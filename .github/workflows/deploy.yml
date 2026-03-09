@@ -29,21 +29,28 @@ jobs:
       - name: Deploy to AWS EC2
         uses: appleboy/ssh-action@v1.2.0
         with:
-          debug: true
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: DOCKER_USERNAME,DOCKER_PASSWORD
           script: |
-            # Login to Docker Hub on EC2 (Required if repo is private)
-            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+            # Exit on any error
+            set -e
+
+            # Login to Docker Hub
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
 
             # Pull latest image
-            docker pull ${{ secrets.DOCKER_USERNAME }}/myapp:latest
+            docker pull $DOCKER_USERNAME/myapp:latest
 
-            # Stop and Remove existing container
+            # Stop and Remove existing container (ignore errors if it doesn't exist)
             docker stop app-container || true
             docker rm app-container || true
 
             # Run new container
-            # FastAPI typically runs on 8000, mapping to host 80
-            docker run -d --name app-container -p 80:8000 ${{ secrets.DOCKER_USERNAME }}/myapp:latest
+            docker run -d --name app-container -p 80:8000 $DOCKER_USERNAME/myapp:latest
+
+            # Verify if it's running
+            sleep 5
+            docker ps | grep app-container
+            echo "Deployment successful!"
