@@ -78,6 +78,14 @@ jobs:
             # Clean up old tags (optional hygiene)
             docker system prune -f
 
+            # Stop the old container holding port 80 (from earlier non-compose deployments)
+            OLD_PORT80_CONTAINER=$(docker ps -q -f "publish=80")
+            if [ -n "$OLD_PORT80_CONTAINER" ]; then
+                echo "Stopping old container holding port 80 to avoid conflicts..."
+                docker stop $OLD_PORT80_CONTAINER || true
+                docker rm $OLD_PORT80_CONTAINER || true
+            fi
+
             # Start or update the required infrastructure (Database)
             $DC up -d db
 
