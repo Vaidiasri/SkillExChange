@@ -81,7 +81,9 @@ jobs:
             $DC up -d db
 
             # Login to Docker Hub using secrets directly (from .env)
+            set -a
             source .env
+            set +a
             echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
             
             # Pull the new image first (avoids downtime during download)
