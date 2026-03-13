@@ -35,7 +35,7 @@ async def create_user(request: User, db: AsyncSession = Depends(get_db)):
     new_user = UserModel(
         name=request.name,
         email=request.email,
-        password=hash_password(request.password)
+        hashed_password=hash_password(request.password)
     )
     db.add(new_user)
     await db.commit()
