@@ -24,32 +24,92 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/myapp:latest
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/myapp:latest
+            ${{ secrets.DOCKER_USERNAME }}/myapp:${{ github.sha }}
 
-      - name: Deploy to AWS EC2
+      # Prepare environment variables dynamically
+      - name: Create .env file for Docker Compose
+        run: |
+          echo "POSTGRES_USER=${{ secrets.POSTGRES_USER }}" >> .env
+          echo "POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}" >> .env
+          echo "POSTGRES_DB=${{ secrets.POSTGRES_DB }}" >> .env
+          echo "DOCKER_USERNAME=${{ secrets.DOCKER_USERNAME }}" >> .env
+          echo "IMAGE_TAG=${{ github.sha }}" >> .env
+
+      - name: Copy docker-compose and .env to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "docker-compose.yml,.env"
+          target: "~/fastapi-app/"
+
+      - name: Deploy with Zero-Downtime via Docker Compose
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            # Exit on any error
+            # Exit on any unhandled error
             set -e
+            
+            # Go to app directory
+            cd ~/fastapi-app/
 
-            # Login to Docker Hub using secrets directly
-            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+            # Clean up old tags (optional hygiene)
+            docker system prune -f
 
-            # Pull latest image
-            docker pull ${{ secrets.DOCKER_USERNAME }}/myapp:latest
+            # Start or update the required infrastructure (Database)
+            docker compose up -d db
 
-            # Stop and Remove existing container (ignore errors if it doesn't exist)
-            docker stop app-container || true
-            docker rm app-container || true
+            # Login to Docker Hub using secrets directly (from .env)
+            source .env
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+            
+            # Pull the new image first (avoids downtime during download)
+            echo "Pulling new image version $IMAGE_TAG..."
+            docker pull $DOCKER_USERNAME/myapp:$IMAGE_TAG
 
-            # Run new container
-            docker run -d --name app-container -p 80:8000 ${{ secrets.DOCKER_USERNAME }}/myapp:latest
-
-            # Verify if it's running
-            sleep 5
-            docker ps | grep app-container
-            echo "Deployment successful!"
+            # Find the ID of the currently running web container (if any)
+            OLD_CONTAINER_ID=$(docker ps -q -f name=fastapi-app-web)
+            
+            # Force recreating ONLY the web service with the new image, 
+            # while scaling them up (running side-by-side conceptually is hard without LB,
+            # so we'll do a quick replace strategy via standard compose)
+            echo "Starting new web container..."
+            docker compose up -d --no-deps --build web
+            
+            # Health check loop (Wait up to 30 seconds for the container to become healthy/running)
+            echo "Waiting for new container to stabilize..."
+            sleep 10
+            
+            # Verify if the NEW container is actually running
+            NEW_CONTAINER_STATUS=$(docker inspect --format='{{.State.Status}}' $(docker compose ps -q web))
+            
+            if [ "$NEW_CONTAINER_STATUS" = "running" ]; then
+                echo "✅ Deployment successful. New container is running."
+                # We can safely clean up older unused web images now
+                docker image prune -a --filter "until=1h" -f
+            else
+                echo "❌ Deployment FAILED. New container crashed."
+                # Print logs for debugging
+                docker compose logs web
+                
+                # Rollback strategy: 
+                # Since docker-compose tracks state, rolling back requires pointing back to the old tag if needed,
+                # but standard `docker compose down` and `up` on the old image is safer.
+                # If we had a load balancer, we would just flip traffic. Here, we restore the old state.
+                echo "Rolling back to previous state..."
+                # Extract the old image name from the old container
+                if [ -n "$OLD_CONTAINER_ID" ]; then
+                   OLD_IMAGE=$(docker inspect --format='{{.Config.Image}}' $OLD_CONTAINER_ID)
+                   echo "Restoring image $OLD_IMAGE..."
+                   # Force compose to run the old image by overriding the environment
+                   export IMAGE_TAG=$(echo $OLD_IMAGE | cut -d':' -f2)
+                   docker compose up -d --no-deps web
+                fi
+                exit 1 # Fail the pipeline
+            fi
