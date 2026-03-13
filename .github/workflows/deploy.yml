@@ -58,9 +58,9 @@ jobs:
             
             # Ensure Docker Compose is installed
             if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
-                echo "Docker Compose not found. Installing..."
-                sudo apt-get update
-                sudo apt-get install -y docker-compose-plugin docker-compose
+                echo "Docker Compose not found. Installing via curl..."
+                sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+                sudo chmod +x /usr/local/bin/docker-compose
             fi
 
             # Alias for Docker Compose
