@@ -56,6 +56,20 @@ jobs:
             # Exit on any unhandled error
             set -e
             
+            # Ensure Docker Compose is installed
+            if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+                echo "Docker Compose not found. Installing..."
+                sudo apt-get update
+                sudo apt-get install -y docker-compose-plugin docker-compose
+            fi
+
+            # Alias for Docker Compose
+            if docker compose version >/dev/null 2>&1; then
+                DC="docker compose"
+            else
+                DC="docker-compose"
+            fi
+            
             # Go to app directory
             cd ~/fastapi-app/
 
@@ -63,7 +77,7 @@ jobs:
             docker system prune -f
 
             # Start or update the required infrastructure (Database)
-            docker compose up -d db
+            $DC up -d db
 
             # Login to Docker Hub using secrets directly (from .env)
             source .env
@@ -77,31 +91,26 @@ jobs:
             OLD_CONTAINER_ID=$(docker ps -q -f name=fastapi-app-web)
             
             # Force recreating ONLY the web service with the new image, 
-            # while scaling them up (running side-by-side conceptually is hard without LB,
-            # so we'll do a quick replace strategy via standard compose)
             echo "Starting new web container..."
-            docker compose up -d --no-deps --build web
+            $DC up -d --no-deps --build web
             
             # Health check loop (Wait up to 30 seconds for the container to become healthy/running)
             echo "Waiting for new container to stabilize..."
             sleep 10
             
             # Verify if the NEW container is actually running
-            NEW_CONTAINER_STATUS=$(docker inspect --format='{{.State.Status}}' $(docker compose ps -q web))
+            NEW_CONTAINER_STATUS=$(docker inspect --format='{{.State.Status}}' $($DC ps -q web))
             
             if [ "$NEW_CONTAINER_STATUS" = "running" ]; then
-                echo "✅ Deployment successful. New container is running."
+                echo "Deployment successful. New container is running."
                 # We can safely clean up older unused web images now
                 docker image prune -a --filter "until=1h" -f
             else
-                echo "❌ Deployment FAILED. New container crashed."
+                echo "Deployment FAILED. New container crashed."
                 # Print logs for debugging
-                docker compose logs web
+                $DC logs web
                 
                 # Rollback strategy: 
-                # Since docker-compose tracks state, rolling back requires pointing back to the old tag if needed,
-                # but standard `docker compose down` and `up` on the old image is safer.
-                # If we had a load balancer, we would just flip traffic. Here, we restore the old state.
                 echo "Rolling back to previous state..."
                 # Extract the old image name from the old container
                 if [ -n "$OLD_CONTAINER_ID" ]; then
@@ -109,7 +118,7 @@ jobs:
                    echo "Restoring image $OLD_IMAGE..."
                    # Force compose to run the old image by overriding the environment
                    export IMAGE_TAG=$(echo $OLD_IMAGE | cut -d':' -f2)
-                   docker compose up -d --no-deps web
+                   $DC up -d --no-deps web
                 fi
                 exit 1 # Fail the pipeline
             fi
